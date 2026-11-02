@@ -2,13 +2,13 @@
 
 [![CI/CD](https://github.com/Canale0107/aws-daily-cost-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/Canale0107/aws-daily-cost-monitor/actions/workflows/ci.yml)
 
-この Terraform プロジェクトは、AWS 上の毎日のコスト状況とリソース取得状況を自動的に取得し、メールで通知する仕組みを構築します。
+この Terraform プロジェクトは、AWS 上の毎日のコスト状況とリソース取得状況を自動的に取得し、Slack（またはメール）で通知する仕組みを構築します。
 
 ## 機能
 
 - **毎日のコストレポート**: 過去 N 日間の AWS コストをサービス別に集計
 - **リソース情報**: EC2、RDS、S3、Lambda 等の主要リソースの数を取得
-- **メール通知**: 設定したメールアドレスに自動送信
+- **Slack / メール通知**: Slack の Incoming Webhook、またはメールに自動送信（`notification_channels` で切り替え可能）
 - **スケジュール実行**: EventBridge（CloudWatch Events）による定期実行
 
 ## アーキテクチャ
@@ -19,7 +19,8 @@ EventBridge (日次トリガー)
 Lambda関数
     ├─→ AWS Cost Explorer (コスト情報取得)
     ├─→ EC2/RDS/S3/Lambda (リソース情報取得)
-    └─→ SNS (メール通知)
+    ├─→ Slack Incoming Webhook (Slack 通知)
+    └─→ SNS (メール通知。メールを有効にした場合のみ)
 ```
 
 ![構成図](/diagrams/overview.drawio.svg)
@@ -28,7 +29,7 @@ Lambda関数
 
 - **EventBridge Rule**: 毎日指定時刻に Lambda 関数をトリガー
 - **Lambda Function**: コストとリソース情報を取得・整形
-- **SNS Topic**: メール通知を配信
+- **SNS Topic**: メール通知を配信（`notification_channels` に `email` を含めた場合のみ作成）
 - **IAM Roles**: 必要な権限を付与
 
 すべてのリソースには以下のタグが自動的に付与されます：
@@ -41,7 +42,8 @@ Lambda関数
 
 - Terraform >= 1.0
 - AWS CLI 設定済み（認証情報が設定されていること）
-- メールアドレス
+- Slack Incoming Webhook の URL（発行手順は [docs/SLACK_SETUP.md](docs/SLACK_SETUP.md) を参照）
+  - メール通知を使う場合は、代わりにメールアドレスを用意
 - 適切な IAM 権限（詳細は [TERRAFORM_SETUP.md](TERRAFORM_SETUP.md) を参照）
 
 ## セットアップ手順
@@ -77,10 +79,18 @@ cp terraform.tfvars.example terraform.tfvars
 `terraform.tfvars` を編集して、必要な値を設定：
 
 ```hcl
-aws_region         = "ap-northeast-1"
-notification_email = "your-email@example.com"
-project_name       = "daily-cost-monitor"
-days_to_check      = 7
+aws_region    = "ap-northeast-1"
+project_name  = "daily-cost-monitor"
+days_to_check = 7
+
+# 通知先: ["slack"], ["email"], ["slack", "email"] から選択
+notification_channels = ["slack"]
+
+# Slack を使う場合（秘密情報。環境変数 TF_VAR_slack_webhook_url での指定を推奨）
+slack_webhook_url = "https://hooks.slack.com/services/XXXX/XXXX/XXXX"
+
+# メールを使う場合
+# notification_email = "your-email@example.com"
 
 # Environment and system tags
 environment = "dev"
@@ -124,8 +134,10 @@ terraform plan
 terraform apply
 ```
 
-実行後、指定したメールアドレスに **SNS サブスクリプションの確認メール** が届きます。
+メール通知を有効にした場合は、指定したメールアドレスに **SNS サブスクリプションの確認メール** が届きます。
 メール内の確認リンクをクリックして、サブスクリプションを有効化してください。
+
+Slack のみの場合、確認作業は不要です。
 
 ### 8. 動作確認（オプション）
 
@@ -159,7 +171,7 @@ schedule_expression = "cron(0 1 ? * MON-FRI *)"
 
 ## レポート内容
 
-メールで送信されるレポートには以下の情報が含まれます：
+Slack またはメールで送信されるレポートには以下の情報が含まれます：
 
 ### コスト情報
 
@@ -197,12 +209,17 @@ clusters = ecs_client.list_clusters()
 
 - **Lambda**: 月に 1 回程度の実行で数セント以下
 - **EventBridge**: 無料枠内
-- **SNS**: メール配信は月 1000 件まで無料
+- **SNS**（メール通知のみ）: メール配信は月 1000 件まで無料
+- **Slack Incoming Webhook**: 無料
 - **Cost Explorer API**: 1 リクエストあたり $0.01（月 30 回で約$0.30）
 
 月額コスト: **約$0.50 以下**
 
 ## トラブルシューティング
+
+### Slack に投稿されない
+
+[docs/SLACK_SETUP.md のトラブルシューティング](docs/SLACK_SETUP.md#トラブルシューティング) を参照してください。
 
 ### メールが届かない
 
@@ -256,11 +273,13 @@ setup-iam.sh で作成した IAM ユーザーとポリシーを削除する場�
 ### 実行されるテスト
 
 **Terraform**
+
 - フォーマットチェック (`terraform fmt`)
 - 構文検証 (`terraform validate`)
 - セキュリティスキャン (`tfsec`)
 
 **Python**
+
 - コードフォーマットチェック (`black`)
 - コード品質チェック (`pylint`)
 - セキュリティスキャン (`bandit`)

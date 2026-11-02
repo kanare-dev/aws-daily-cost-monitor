@@ -7,7 +7,7 @@
 - [ ] AWS CLI がインストール済み
 - [ ] AWS 認証情報が設定済み（管理者権限推奨）
 - [ ] Terraform がインストール済み（>= 1.0）
-- [ ] メールアドレスを用意
+- [ ] Slack Incoming Webhook の URL を用意（[SLACK_SETUP.md](SLACK_SETUP.md) を参照。メール通知なら、メールアドレスを用意）
 
 ## 🚀 5 分でセットアップ
 
@@ -29,15 +29,19 @@
 # サンプルファイルをコピー
 cp terraform.tfvars.example terraform.tfvars
 
-# エディタで編集（メールアドレスを設定）
+# エディタで編集（Slack Webhook URL を設定）
 vim terraform.tfvars  # または nano, code など
 ```
 
 **最低限編集が必要な項目:**
 
 ```hcl
-notification_email = "your-email@example.com"  # ← ここを変更
+notification_channels = ["slack"]  # メールなら ["email"]、両方なら ["slack", "email"]
+slack_webhook_url     = "https://hooks.slack.com/services/XXXX/XXXX/XXXX"  # ← ここを変更
 ```
+
+Webhook URL は秘密情報です。ファイルに書かず、`export TF_VAR_slack_webhook_url="..."` で渡すこともできます。
+Webhook の発行方法は [SLACK_SETUP.md](SLACK_SETUP.md) を参照してください。メール通知を使う場合は `notification_email` を設定します。
 
 ### ステップ 3: Terraform を実行
 
@@ -60,7 +64,7 @@ terraform apply
 
 `yes` と入力して Enter を押すとデプロイが開始されます。
 
-### ステップ 4: メールを確認
+### ステップ 4: メールを確認（メール通知を有効にした場合のみ）
 
 1. 指定したメールアドレスに **AWS Notification - Subscription Confirmation** という件名のメールが届きます
 2. メール内の **Confirm subscription** リンクをクリック
@@ -79,9 +83,9 @@ aws lambda invoke \
 cat output.json
 ```
 
-数分後、レポートメールが届きます。
+数分後、Slack（またはメール）にレポートが届きます。
 
-## ✅ 完了！
+## ✅ 完了
 
 これで毎日指定した時刻（デフォルト: JST 9:00）にコストレポートが届くようになりました。
 
@@ -161,6 +165,7 @@ terraform destroy
 2. **迷惑メールフォルダを確認**
 
 3. **Lambda 関数のログを確認**
+
    ```bash
    aws logs tail /aws/lambda/daily-cost-monitor-function --follow
    ```
