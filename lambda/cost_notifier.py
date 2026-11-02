@@ -1,5 +1,6 @@
 import json
 import os
+import urllib.request
 from datetime import datetime, timedelta
 import boto3
 from decimal import Decimal
@@ -160,7 +161,7 @@ def format_cost_message(cost_data, resources, days):
 
 
 def send_notification(message, topic_arn):
-    """Send notification via SNS"""
+    """Send notification via SNS (email)"""
     try:
         response = sns_client.publish(
             TopicArn=topic_arn,
@@ -174,17 +175,65 @@ def send_notification(message, topic_arn):
         return False
 
 
+def send_slack_notification(message, webhook_url):
+    """Send notification to Slack via Incoming Webhook"""
+    title = f"*AWS Daily Report - {datetime.now().strftime('%Y-%m-%d')}*"
+    # Wrap in a code block to preserve the plain-text layout
+    payload = {"text": f"{title}\n```\n{message}\n```"}
+    request = urllib.request.Request(
+        webhook_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = response.read().decode("utf-8")
+            if response.status != 200:
+                print(f"Slack returned unexpected status {response.status}: {body}")
+                return False
+        print("Slack notification sent successfully.")
+        return True
+    except Exception as e:
+        # Do not log the webhook URL: it is a secret
+        print(f"Error sending Slack notification: {e}")
+        return False
+
+
+def get_channels():
+    """Parse NOTIFICATION_CHANNELS (comma separated: slack, email)"""
+    raw = os.environ.get("NOTIFICATION_CHANNELS", "email")
+    return [c.strip().lower() for c in raw.split(",") if c.strip()]
+
+
 def lambda_handler(event, context):
     """Main Lambda handler"""
     print("Starting AWS daily cost and resource report generation...")
 
     # Get environment variables
+    channels = get_channels()
     sns_topic_arn = os.environ.get("SNS_TOPIC_ARN")
+    slack_webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
     days_to_check = int(os.environ.get("DAYS_TO_CHECK", "7"))
 
-    if not sns_topic_arn:
+    unknown = [c for c in channels if c not in ("slack", "email")]
+    if unknown or not channels:
+        print(f"ERROR: invalid NOTIFICATION_CHANNELS: {channels}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps("NOTIFICATION_CHANNELS is invalid"),
+        }
+
+    if "email" in channels and not sns_topic_arn:
         print("ERROR: SNS_TOPIC_ARN environment variable not set")
         return {"statusCode": 500, "body": json.dumps("SNS_TOPIC_ARN not configured")}
+
+    if "slack" in channels and not slack_webhook_url:
+        print("ERROR: SLACK_WEBHOOK_URL environment variable not set")
+        return {
+            "statusCode": 500,
+            "body": json.dumps("SLACK_WEBHOOK_URL not configured"),
+        }
 
     # Get cost data
     print(f"Fetching cost data for the last {days_to_check} days...")
@@ -198,11 +247,15 @@ def lambda_handler(event, context):
     print("Formatting message...")
     message = format_cost_message(cost_data, resources, days_to_check)
 
-    # Send notification
-    print("Sending notification...")
-    success = send_notification(message, sns_topic_arn)
+    # Send notification to every configured channel
+    print(f"Sending notification to: {', '.join(channels)}")
+    results = []
+    if "email" in channels:
+        results.append(send_notification(message, sns_topic_arn))
+    if "slack" in channels:
+        results.append(send_slack_notification(message, slack_webhook_url))
 
-    if success:
+    if all(results):
         return {"statusCode": 200, "body": json.dumps("Report sent successfully")}
     else:
         return {"statusCode": 500, "body": json.dumps("Failed to send report")}

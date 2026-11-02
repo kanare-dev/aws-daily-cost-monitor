@@ -292,6 +292,55 @@ class TestSendNotification:
             mock_sns_client_exception.publish.assert_called_once()
 
 
+@pytest.mark.unit
+class TestSendSlackNotification:
+    """Tests for send_slack_notification function"""
+
+    WEBHOOK = "https://hooks.slack.com/services/T000/B000/XXXX"
+
+    def _mock_response(self, status=200, body=b"ok"):
+        response = Mock()
+        response.status = status
+        response.read.return_value = body
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        return response
+
+    def test_send_slack_notification_success(self):
+        with patch(
+            "cost_notifier.urllib.request.urlopen", return_value=self._mock_response()
+        ) as mock_urlopen:
+            from cost_notifier import send_slack_notification
+
+            result = send_slack_notification("Test message 日本語", self.WEBHOOK)
+
+            assert result is True
+            request = mock_urlopen.call_args[0][0]
+            assert request.full_url == self.WEBHOOK
+            assert request.get_method() == "POST"
+            payload = json.loads(request.data.decode("utf-8"))
+            assert "Test message 日本語" in payload["text"]
+
+    def test_send_slack_notification_non_200(self):
+        with patch(
+            "cost_notifier.urllib.request.urlopen",
+            return_value=self._mock_response(status=500, body=b"error"),
+        ):
+            from cost_notifier import send_slack_notification
+
+            assert send_slack_notification("Test", self.WEBHOOK) is False
+
+    def test_send_slack_notification_exception(self, capsys):
+        with patch(
+            "cost_notifier.urllib.request.urlopen", side_effect=Exception("boom")
+        ):
+            from cost_notifier import send_slack_notification
+
+            assert send_slack_notification("Test", self.WEBHOOK) is False
+            # The webhook URL is a secret and must not be logged
+            assert self.WEBHOOK not in capsys.readouterr().out
+
+
 @pytest.mark.integration
 class TestLambdaHandler:
     """Integration tests for lambda_handler function"""
@@ -397,3 +446,73 @@ class TestLambdaHandler:
 
             assert response["statusCode"] == 500
             assert "Failed to send report" in response["body"]
+
+
+@pytest.mark.integration
+class TestLambdaHandlerChannels:
+    """Tests for notification channel selection in lambda_handler"""
+
+    def _run(self, monkeypatch, env, mock_ce_client, mock_cost_response):
+        for key in ("NOTIFICATION_CHANNELS", "SNS_TOPIC_ARN", "SLACK_WEBHOOK_URL"):
+            monkeypatch.delenv(key, raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+        mock_ce_client.get_cost_and_usage.return_value = mock_cost_response
+        with patch("cost_notifier.ce_client", mock_ce_client), patch(
+            "cost_notifier.get_resource_counts", return_value={}
+        ), patch("cost_notifier.format_cost_message", return_value="msg"), patch(
+            "cost_notifier.send_notification", return_value=True
+        ) as email, patch(
+            "cost_notifier.send_slack_notification", return_value=True
+        ) as slack:
+            from cost_notifier import lambda_handler
+
+            return lambda_handler({}, None), email, slack
+
+    def test_slack_only(self, monkeypatch, mock_ce_client, mock_cost_response):
+        response, email, slack = self._run(
+            monkeypatch,
+            {"NOTIFICATION_CHANNELS": "slack", "SLACK_WEBHOOK_URL": "https://x"},
+            mock_ce_client,
+            mock_cost_response,
+        )
+        assert response["statusCode"] == 200
+        slack.assert_called_once()
+        email.assert_not_called()
+
+    def test_both_channels(self, monkeypatch, mock_ce_client, mock_cost_response):
+        response, email, slack = self._run(
+            monkeypatch,
+            {
+                "NOTIFICATION_CHANNELS": "slack,email",
+                "SLACK_WEBHOOK_URL": "https://x",
+                "SNS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:t",
+            },
+            mock_ce_client,
+            mock_cost_response,
+        )
+        assert response["statusCode"] == 200
+        slack.assert_called_once()
+        email.assert_called_once()
+
+    def test_missing_webhook_url(self, monkeypatch, mock_ce_client, mock_cost_response):
+        response, email, slack = self._run(
+            monkeypatch,
+            {"NOTIFICATION_CHANNELS": "slack"},
+            mock_ce_client,
+            mock_cost_response,
+        )
+        assert response["statusCode"] == 500
+        assert "SLACK_WEBHOOK_URL not configured" in response["body"]
+        slack.assert_not_called()
+
+    def test_invalid_channel(self, monkeypatch, mock_ce_client, mock_cost_response):
+        response, _, _ = self._run(
+            monkeypatch,
+            {"NOTIFICATION_CHANNELS": "teams"},
+            mock_ce_client,
+            mock_cost_response,
+        )
+        assert response["statusCode"] == 500
+        assert "NOTIFICATION_CHANNELS is invalid" in response["body"]
