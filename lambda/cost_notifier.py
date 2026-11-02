@@ -1,7 +1,7 @@
 import json
 import os
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import boto3
 from decimal import Decimal
 
@@ -12,6 +12,8 @@ ec2_client = boto3.client("ec2")
 rds_client = boto3.client("rds")
 s3_client = boto3.client("s3")
 lambda_client = boto3.client("lambda")
+
+JST = timezone(timedelta(hours=9))
 
 
 def get_cost_data(days=7):
@@ -87,19 +89,8 @@ def get_resource_counts():
     return resources
 
 
-def format_cost_message(cost_data, resources, days):
-    """Format cost and resource data into a readable message"""
-    if not cost_data:
-        return "コストデータの取得に失敗しました。"
-
-    message = "=== AWS 日次レポート ===\n\n"
-    message += f"📅 期間: 過去{days}日間\n"
-    message += f"🕐 生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-    # Cost summary
-    message += "💰 コスト情報\n"
-    message += "=" * 50 + "\n\n"
-
+def summarize_costs(cost_data):
+    """Aggregate cost data into per-day and per-service totals"""
     daily_totals = {}
     service_totals = {}
 
@@ -118,6 +109,24 @@ def format_cost_message(cost_data, resources, days):
                 total_cost += cost
 
         daily_totals[date] = total_cost
+
+    return daily_totals, service_totals
+
+
+def format_cost_message(cost_data, resources, days):
+    """Format cost and resource data into a readable message"""
+    if not cost_data:
+        return "コストデータの取得に失敗しました。"
+
+    message = "=== AWS 日次レポート ===\n\n"
+    message += f"📅 期間: 過去{days}日間\n"
+    message += f"🕐 生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+
+    # Cost summary
+    message += "💰 コスト情報\n"
+    message += "=" * 50 + "\n\n"
+
+    daily_totals, service_totals = summarize_costs(cost_data)
 
     # Daily costs
     message += "📊 日別コスト:\n"
@@ -160,6 +169,131 @@ def format_cost_message(cost_data, resources, days):
     return message
 
 
+def _escape_slack(text):
+    """Escape characters that have a special meaning in Slack mrkdwn"""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _bar(value, max_value, width=10):
+    """Render a simple text bar scaled to max_value"""
+    if max_value <= 0 or value <= 0:
+        return ""
+    return "█" * max(1, int(round(float(value / max_value) * width)))
+
+
+def _usd(value):
+    """Format a cost as a right-aligned dollar amount"""
+    return f"${float(value):.2f}".rjust(9)
+
+
+def _truncate(text, length):
+    return text if len(text) <= length else text[: length - 1] + "…"
+
+
+def format_slack_payload(cost_data, resources, days):
+    """Format cost and resource data into a Slack Block Kit payload"""
+    now = datetime.now(JST)
+    title = f"AWS 日次レポート {now.strftime('%Y-%m-%d')}"
+
+    if not cost_data:
+        return {"text": f"{title}\nコストデータの取得に失敗しました。"}
+
+    daily_totals, service_totals = summarize_costs(cost_data)
+    total = sum(daily_totals.values(), Decimal("0"))
+    average = total / days
+    dates = sorted(daily_totals)
+
+    summary_fields = [
+        {"type": "mrkdwn", "text": f"*合計（過去{days}日間）*\n${float(total):.2f}"},
+        {"type": "mrkdwn", "text": f"*1日平均*\n${float(average):.2f}"},
+    ]
+    if dates:
+        latest_date = dates[-1]
+        latest = daily_totals[latest_date]
+        trend = ""
+        if len(dates) >= 2 and daily_totals[dates[-2]] > 0:
+            prev = daily_totals[dates[-2]]
+            pct = float((latest - prev) / prev * 100)
+            arrow = "▲" if pct > 0 else "▼" if pct < 0 else "→"
+            trend = f"（{arrow}{abs(pct):.0f}% 前日比）"
+        summary_fields.append(
+            {
+                "type": "mrkdwn",
+                "text": f"*直近日（{latest_date}）*\n${float(latest):.2f}{trend}",
+            }
+        )
+
+    max_daily = max(daily_totals.values(), default=Decimal("0"))
+    daily_lines = [
+        f"{date}  {_usd(daily_totals[date])}  {_bar(daily_totals[date], max_daily)}".rstrip()
+        for date in dates
+    ]
+
+    sorted_services = sorted(service_totals.items(), key=lambda x: x[1], reverse=True)
+    service_lines = []
+    for service, cost in sorted_services[:10]:
+        share = float(cost / total * 100) if total > 0 else 0
+        name = _truncate(_escape_slack(service), 36)
+        service_lines.append(f"{name:<36} {_usd(cost)} {share:>4.0f}%")
+
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"💰 {title}"}},
+        {"type": "section", "fields": summary_fields},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*📊 日別コスト*\n```" + ("\n".join(daily_lines) or "データなし") + "```",
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*🏆 サービス別コスト（上位10件）*\n```"
+                + ("\n".join(service_lines) or "データなし")
+                + "```",
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*📦 EC2*\n稼働中 {resources['EC2']['running']} / 総数 {resources['EC2']['total']}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*🗄️ RDS*\n利用可能 {resources['RDS']['available']} / 総数 {resources['RDS']['total']}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*🪣 S3*\nバケット {resources['S3']['total_buckets']}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*λ Lambda*\n関数 {resources['Lambda']['total_functions']}",
+                },
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"このレポートは自動生成されました ・ 生成日時 {now.strftime('%Y-%m-%d %H:%M')} JST",
+                }
+            ],
+        },
+    ]
+
+    return {
+        "text": f"{title}: 過去{days}日間の合計 ${float(total):.2f}",  # notification fallback
+        "blocks": blocks,
+    }
+
+
 def send_notification(message, topic_arn):
     """Send notification via SNS (email)"""
     try:
@@ -175,11 +309,8 @@ def send_notification(message, topic_arn):
         return False
 
 
-def send_slack_notification(message, webhook_url):
-    """Send notification to Slack via Incoming Webhook"""
-    title = f"*AWS Daily Report - {datetime.now().strftime('%Y-%m-%d')}*"
-    # Wrap in a code block to preserve the plain-text layout
-    payload = {"text": f"{title}\n```\n{message}\n```"}
+def send_slack_notification(payload, webhook_url):
+    """Send a Slack message payload (dict) via Incoming Webhook"""
     request = urllib.request.Request(
         webhook_url,
         data=json.dumps(payload).encode("utf-8"),
@@ -253,7 +384,8 @@ def lambda_handler(event, context):
     if "email" in channels:
         results.append(send_notification(message, sns_topic_arn))
     if "slack" in channels:
-        results.append(send_slack_notification(message, slack_webhook_url))
+        slack_payload = format_slack_payload(cost_data, resources, days_to_check)
+        results.append(send_slack_notification(slack_payload, slack_webhook_url))
 
     if all(results):
         return {"statusCode": 200, "body": json.dumps("Report sent successfully")}

@@ -293,6 +293,86 @@ class TestSendNotification:
 
 
 @pytest.mark.unit
+class TestFormatSlackPayload:
+    """Tests for format_slack_payload function"""
+
+    def _texts(self, payload):
+        """Collect every text string in the blocks"""
+        texts = []
+        for block in payload["blocks"]:
+            if "text" in block:
+                texts.append(block["text"]["text"])
+            for field in block.get("fields", []):
+                texts.append(field["text"])
+            for element in block.get("elements", []):
+                texts.append(element["text"])
+        return "\n".join(texts)
+
+    def test_payload_structure(self, mock_cost_response, mock_resource_data):
+        from cost_notifier import format_slack_payload
+
+        payload = format_slack_payload(mock_cost_response, mock_resource_data, 7)
+
+        assert "AWS 日次レポート" in payload["text"]
+        assert payload["blocks"][0]["type"] == "header"
+        # Slack limits: 50 blocks, 3000 chars per section text, 10 fields
+        assert len(payload["blocks"]) <= 50
+        for block in payload["blocks"]:
+            if "text" in block and block["type"] == "section":
+                assert len(block["text"]["text"]) <= 3000
+            assert len(block.get("fields", [])) <= 10
+        # Must be JSON serializable
+        json.dumps(payload)
+
+    def test_payload_contains_costs_and_resources(
+        self, mock_cost_response, mock_resource_data
+    ):
+        from cost_notifier import format_slack_payload
+
+        text = self._texts(format_slack_payload(mock_cost_response, mock_resource_data, 7))
+
+        assert "日別コスト" in text
+        assert "サービス別コスト" in text
+        assert "$" in text
+        assert f"総数 {mock_resource_data['EC2']['total']}" in text
+
+    def test_payload_with_none_cost_data(self, mock_resource_data):
+        from cost_notifier import format_slack_payload
+
+        payload = format_slack_payload(None, mock_resource_data, 7)
+
+        assert "コストデータの取得に失敗しました" in payload["text"]
+        assert "blocks" not in payload
+
+    def test_payload_with_empty_results(self, mock_resource_data):
+        from cost_notifier import format_slack_payload
+
+        payload = format_slack_payload({"ResultsByTime": []}, mock_resource_data, 7)
+
+        assert "データなし" in self._texts(payload)
+
+    def test_service_names_are_escaped(self, mock_resource_data):
+        from cost_notifier import format_slack_payload
+
+        cost_data = {
+            "ResultsByTime": [
+                {
+                    "TimePeriod": {"Start": "2026-11-01", "End": "2026-11-02"},
+                    "Groups": [
+                        {
+                            "Keys": ["A&B <svc>"],
+                            "Metrics": {"UnblendedCost": {"Amount": "5.00"}},
+                        }
+                    ],
+                }
+            ]
+        }
+        text = self._texts(format_slack_payload(cost_data, mock_resource_data, 1))
+
+        assert "A&amp;B &lt;svc&gt;" in text
+
+
+@pytest.mark.unit
 class TestSendSlackNotification:
     """Tests for send_slack_notification function"""
 
@@ -312,14 +392,14 @@ class TestSendSlackNotification:
         ) as mock_urlopen:
             from cost_notifier import send_slack_notification
 
-            result = send_slack_notification("Test message 日本語", self.WEBHOOK)
+            result = send_slack_notification({"text": "Test message 日本語"}, self.WEBHOOK)
 
             assert result is True
             request = mock_urlopen.call_args[0][0]
             assert request.full_url == self.WEBHOOK
             assert request.get_method() == "POST"
             payload = json.loads(request.data.decode("utf-8"))
-            assert "Test message 日本語" in payload["text"]
+            assert payload == {"text": "Test message 日本語"}
 
     def test_send_slack_notification_non_200(self):
         with patch(
@@ -328,7 +408,7 @@ class TestSendSlackNotification:
         ):
             from cost_notifier import send_slack_notification
 
-            assert send_slack_notification("Test", self.WEBHOOK) is False
+            assert send_slack_notification({"text": "Test"}, self.WEBHOOK) is False
 
     def test_send_slack_notification_exception(self, capsys):
         with patch(
@@ -336,7 +416,7 @@ class TestSendSlackNotification:
         ):
             from cost_notifier import send_slack_notification
 
-            assert send_slack_notification("Test", self.WEBHOOK) is False
+            assert send_slack_notification({"text": "Test"}, self.WEBHOOK) is False
             # The webhook URL is a secret and must not be logged
             assert self.WEBHOOK not in capsys.readouterr().out
 
@@ -462,6 +542,8 @@ class TestLambdaHandlerChannels:
         with patch("cost_notifier.ce_client", mock_ce_client), patch(
             "cost_notifier.get_resource_counts", return_value={}
         ), patch("cost_notifier.format_cost_message", return_value="msg"), patch(
+            "cost_notifier.format_slack_payload", return_value={"text": "msg"}
+        ), patch(
             "cost_notifier.send_notification", return_value=True
         ) as email, patch(
             "cost_notifier.send_slack_notification", return_value=True
