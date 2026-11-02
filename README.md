@@ -40,7 +40,7 @@ Lambda関数
 
 ## 前提条件
 
-- Terraform >= 1.0
+- Terraform >= 1.3
 - AWS CLI 設定済み（認証情報が設定されていること）
 - Slack Incoming Webhook の URL（発行手順は [docs/SLACK_SETUP.md](docs/SLACK_SETUP.md) を参照）
   - メール通知を使う場合は、代わりにメールアドレスを用意
