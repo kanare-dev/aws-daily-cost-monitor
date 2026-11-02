@@ -37,7 +37,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect = "Allow"
         Action = [
@@ -67,14 +67,15 @@ resource "aws_iam_role_policy" "lambda_policy" {
         ]
         Resource = "*"
       },
-      {
-        Effect = "Allow"
-        Action = [
-          "sns:Publish"
-        ]
-        Resource = aws_sns_topic.cost_notification.arn
-      }
-    ]
+      ],
+      local.email_enabled ? [
+        {
+          Effect   = "Allow"
+          Action   = ["sns:Publish"]
+          Resource = aws_sns_topic.cost_notification[0].arn
+        }
+      ] : []
+    )
   })
 }
 
@@ -90,15 +91,26 @@ resource "aws_lambda_function" "cost_notifier" {
   memory_size      = 256
 
   environment {
-    variables = {
-      SNS_TOPIC_ARN = aws_sns_topic.cost_notification.arn
-      DAYS_TO_CHECK = var.days_to_check
-    }
+    variables = merge(
+      {
+        NOTIFICATION_CHANNELS = join(",", var.notification_channels)
+        DAYS_TO_CHECK         = var.days_to_check
+      },
+      local.email_enabled ? { SNS_TOPIC_ARN = aws_sns_topic.cost_notification[0].arn } : {},
+      local.slack_enabled ? { SLACK_WEBHOOK_URL = var.slack_webhook_url } : {}
+    )
   }
 
   depends_on = [
     aws_iam_role_policy.lambda_policy
   ]
+
+  lifecycle {
+    precondition {
+      condition     = !local.slack_enabled || var.slack_webhook_url != ""
+      error_message = "slack_webhook_url is required when notification_channels contains \"slack\"."
+    }
+  }
 
   tags = merge(
     local.common_tags,

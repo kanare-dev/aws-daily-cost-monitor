@@ -1,7 +1,6 @@
 # Copy this file to terraform.tfvars and update with your values
 
 aws_region         = "ap-northeast-1"
-notification_email = "your-email@example.com"
 project_name       = "daily-cost-monitor"
 days_to_check      = 7
 
@@ -14,3 +13,14 @@ system_name = "dailycost"
 # Note: Times are in UTC
 schedule_expression = "cron(0 0 * * ? *)"  # UTC 00:00 = JST 09:00
 
+
+# Notification channels: ["slack"], ["email"], or ["slack", "email"]
+notification_channels = ["slack"]
+
+# Required when "slack" is enabled. See docs/SLACK_SETUP.md.
+# This is a secret: do not commit terraform.tfvars (or pass it via
+# `export TF_VAR_slack_webhook_url=...` instead).
+slack_webhook_url = "https://hooks.slack.com/services/<TEAM_ID>/<BOT_ID>/<SECRET>"
+
+# Required when "email" is enabled
+# notification_email = "your-email@example.com"
