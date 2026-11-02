@@ -243,7 +243,9 @@ def format_slack_payload(cost_data, resources, days):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*📊 日別コスト*\n```" + ("\n".join(daily_lines) or "データなし") + "```",
+                "text": "*📊 日別コスト*\n```"
+                + ("\n".join(daily_lines) or "データなし")
+                + "```",
             },
         },
         {

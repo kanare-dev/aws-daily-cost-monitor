@@ -329,7 +329,9 @@ class TestFormatSlackPayload:
     ):
         from cost_notifier import format_slack_payload
 
-        text = self._texts(format_slack_payload(mock_cost_response, mock_resource_data, 7))
+        text = self._texts(
+            format_slack_payload(mock_cost_response, mock_resource_data, 7)
+        )
 
         assert "日別コスト" in text
         assert "サービス別コスト" in text
@@ -392,7 +394,9 @@ class TestSendSlackNotification:
         ) as mock_urlopen:
             from cost_notifier import send_slack_notification
 
-            result = send_slack_notification({"text": "Test message 日本語"}, self.WEBHOOK)
+            result = send_slack_notification(
+                {"text": "Test message 日本語"}, self.WEBHOOK
+            )
 
             assert result is True
             request = mock_urlopen.call_args[0][0]
