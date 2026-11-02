@@ -3,6 +3,16 @@ data "archive_file" "lambda_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../lambda"
   output_path = "${path.module}/lambda_function.zip"
+
+  # Exclude tests and dev files from the deployment package
+  excludes = [
+    "__pycache__",
+    ".pytest_cache",
+    "conftest.py",
+    "test_cost_notifier.py",
+    "requirements.txt",
+    "requirements-dev.txt",
+  ]
 }
 
 # IAM role for Lambda function
